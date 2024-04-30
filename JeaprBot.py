@@ -119,20 +119,30 @@ async def play(interaction: Interaction, url: str):
         await play_next_song(interaction)
 
 @bot.slash_command(name='pause', description='This command pauses the song')
-async def pause(interaction:Interaction):
-    voice_client = interaction.message.guild.voice_client
-    if voice_client.is_playing():
-        await voice_client.pause()
+async def pause(interaction: Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used within a server.", ephemeral=True)
+        return
+
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_playing():
+        voice_client.pause()
+        await interaction.response.send_message("Playback has been paused.")
     else:
-        await interaction.send("The bot is not playing anything at the moment.")
+        await interaction.response.send_message("The bot is not playing anything at the moment.", ephemeral=True)
     
 @bot.slash_command(name='resume', description='Resumes the song')
-async def resume(interaction:Interaction):
-    voice_client = interaction.message.guild.voice_client
-    if voice_client.is_paused():
-        await voice_client.resume()
+async def resume(interaction: Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used within a server.", ephemeral=True)
+        return
+
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_paused():
+        voice_client.resume()
+        await interaction.response.send_message("Playback has been resumed.")
     else:
-        await interaction.send("The bot was not playing anything before this. Use play_song command")
+        await interaction.response.send_message("There is nothing to resume.", ephemeral=True)
 
 @bot.slash_command(name='stop', description='Stops the song')
 async def stop(interaction:Interaction):
@@ -141,7 +151,6 @@ async def stop(interaction:Interaction):
         await voice_client.stop()
     else:
         await interaction.send("The bot is not playing anything at the moment.")
-
 
 @bot.slash_command(name='skip', description='Skips the current song and plays the next one in the queue.')
 async def skip(interaction: Interaction):
@@ -156,11 +165,9 @@ async def skip(interaction: Interaction):
         await interaction.response.send_message("No song is currently playing.", ephemeral=True)
         return
 
-    # Stop the currently playing song
     voice_client.stop()
     await interaction.response.send_message("Skipping to the next song...")
 
-    # Check if there are more songs in the queue to play
     if song_queue.get(guild_id) and song_queue[guild_id]:
         await play_next_song(interaction)
     else:
