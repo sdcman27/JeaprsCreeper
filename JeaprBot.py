@@ -1,7 +1,8 @@
 import asyncio
-import discord
-from discord.ext import commands,tasks
 import os
+import nextcord
+from nextcord.ext import commands
+from nextcord import Interaction
 from dotenv import load_dotenv
 import yt_dlp
 from yt_dlp import DownloadError
@@ -11,11 +12,15 @@ load_dotenv()
 
 # Get the API token from the .env file.
 DISCORD_TOKEN = os.getenv("discord_token")
-
-intents = discord.Intents().all()
-client = discord.Client(intents=intents)
+intents = nextcord.Intents().default()
+intents.messages = True
+intents.guilds = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix='!',intents=intents)
 
+
+# Song queue dictionary
+song_queue = {}
 
 # Suppress noise about console usage from errors
 yt_dlp.utils.bug_reports_message = lambda: ''
@@ -43,7 +48,7 @@ ffmpeg_options = {
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
-class YTDLSource(discord.PCMVolumeTransformer):
+class YTDLSource(nextcord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
         self.data = data
@@ -53,83 +58,113 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True):
         loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        data = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL({
+                'format': 'bestaudio',
+                'noplaylist': True,
+                'quiet': True
+            }).extract_info(url, download=not stream))
         if 'entries' in data:
-            data = data['entries'][0]  # Take first item from a playlist if necessary
+                data = data['entries'][0]
 
-        if 'formats' in data:
-            # Filter formats to find the best audio format that includes an audio codec
-            audio_formats = [f for f in data['formats'] if f.get('acodec') != 'none']
-            if not audio_formats:
-                raise Exception("No audio formats found.")
-            
-            # You can sort these formats by preference or quality. For example, sorting by bitrate:
-            audio_formats.sort(key=lambda f: f.get('abr', 0) or 0, reverse=True)
+        filename = data['url'] if stream else yt_dlp.YoutubeDL({}).prepare_filename(data)
+        return cls(nextcord.FFmpegPCMAudio(filename, **{'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}), data=data)
 
-            # Use the best quality format available
-            best_audio = audio_formats[0]
-            audio_url = best_audio['url']
-        else:
-            raise Exception("No formats found in the video data.")
-
-        return cls(discord.FFmpegPCMAudio(executable="C:\\FFmpeg\\bin\\ffmpeg.exe", source=audio_url, **ffmpeg_options), data=data)
+async def play_next_song(interaction):
+    guild_id = interaction.guild.id
+    if song_queue[guild_id]:
+        source = await YTDLSource.from_url(song_queue[guild_id].pop(0), loop=bot.loop, stream=True)
+        interaction.guild.voice_client.play(source, after=lambda e: bot.loop.create_task(play_next_song(interaction)))
+        await interaction.followup.send(f'Now playing: {source.title}')
+    else:
+        if interaction.guild.voice_client:
+            await interaction.guild.voice_client.disconnect()
     
 
-@bot.command(name='join', help='Tells the bot to join the voice channel')
-async def join(ctx):
-    if not ctx.message.author.voice:
-        await ctx.send("{} is not connected to a voice channel".format(ctx.message.author.name))
-        return
+@bot.slash_command(name='join', description='Tells the bot to join the voice channel')
+async def join(interaction: Interaction):
+    if interaction.user.voice:
+        channel = interaction.user.voice.channel
+        await channel.connect()
+        await interaction.response.send_message(f"{interaction.user.display_name} has joined the voice channel!")
     else:
-        channel = ctx.message.author.voice.channel
-    await channel.connect()
+        await interaction.response.send_message("You are not connected to a voice channel.")
 
-@bot.command(name='leave', help='To make the bot leave the voice channel')
-async def leave(ctx):
-    voice_client = ctx.message.guild.voice_client
-    if voice_client.is_connected():
-        await voice_client.disconnect()
+
+@bot.slash_command(name='leave', description='To make the bot leave the voice channel')
+async def leave(interaction: Interaction):
+    if interaction.guild.voice_client is not None:
+        await interaction.guild.voice_client.disconnect()
+        await interaction.response.send_message("The bot has disconnected from the voice channel.")
     else:
-        await ctx.send("The bot is not connected to a voice channel.")
+        await interaction.response.send_message("The bot is not connected to a voice channel.")
 
-@bot.command(name='play', help='To play song')
-async def play(ctx, url):
-    try:
-        server = ctx.message.guild
-        voice_channel = server.voice_client
+@bot.slash_command(name='play', description='To play song')
+async def play(interaction: Interaction, url: str):
+    if interaction.guild.voice_client is None:
+        if interaction.user.voice:
+            await interaction.user.voice.channel.connect()
+        else:
+            await interaction.response.send_message("You are not connected to a voice channel.", ephemeral=True)
+            return
 
-        async with ctx.typing():
-            player = await YTDLSource.from_url(url, loop=bot.loop)
-            voice_channel.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
+    guild_id = interaction.guild.id
+    if guild_id not in song_queue:
+        song_queue[guild_id] = []
 
-        await ctx.send(f'**Now playing:** {player.title}')
-    except DownloadError as e:
-        await ctx.send(f'The bot could not download the song from YouTube. Error: {e}')
-    except Exception as e:
-        await ctx.send(f'The bot could not play the song. Error: {e}')
+    song_queue[guild_id].append(url)
+    position = len(song_queue[guild_id])
+    await interaction.response.send_message(f'"{url}" is queued at position {position}.')
 
-@bot.command(name='pause', help='This command pauses the song')
-async def pause(ctx):
-    voice_client = ctx.message.guild.voice_client
+    if not interaction.guild.voice_client.is_playing():
+        await play_next_song(interaction)
+
+@bot.slash_command(name='pause', description='This command pauses the song')
+async def pause(interaction:Interaction):
+    voice_client = interaction.message.guild.voice_client
     if voice_client.is_playing():
         await voice_client.pause()
     else:
-        await ctx.send("The bot is not playing anything at the moment.")
+        await interaction.send("The bot is not playing anything at the moment.")
     
-@bot.command(name='resume', help='Resumes the song')
-async def resume(ctx):
-    voice_client = ctx.message.guild.voice_client
+@bot.slash_command(name='resume', description='Resumes the song')
+async def resume(interaction:Interaction):
+    voice_client = interaction.message.guild.voice_client
     if voice_client.is_paused():
         await voice_client.resume()
     else:
-        await ctx.send("The bot was not playing anything before this. Use play_song command")
+        await interaction.send("The bot was not playing anything before this. Use play_song command")
 
-@bot.command(name='stop', help='Stops the song')
-async def stop(ctx):
-    voice_client = ctx.message.guild.voice_client
+@bot.slash_command(name='stop', description='Stops the song')
+async def stop(interaction:Interaction):
+    voice_client = interaction.message.guild.voice_client
     if voice_client.is_playing():
         await voice_client.stop()
     else:
-        await ctx.send("The bot is not playing anything at the moment.")
+        await interaction.send("The bot is not playing anything at the moment.")
+
+
+@bot.slash_command(name='skip', description='Skips the current song and plays the next one in the queue.')
+async def skip(interaction: Interaction):
+    guild_id = interaction.guild.id
+    voice_client = interaction.guild.voice_client
+
+    if voice_client is None:
+        await interaction.response.send_message("The bot is not connected to any voice channel.", ephemeral=True)
+        return
+
+    if not voice_client.is_playing():
+        await interaction.response.send_message("No song is currently playing.", ephemeral=True)
+        return
+
+    # Stop the currently playing song
+    voice_client.stop()
+    await interaction.response.send_message("Skipping to the next song...")
+
+    # Check if there are more songs in the queue to play
+    if song_queue.get(guild_id) and song_queue[guild_id]:
+        await play_next_song(interaction)
+    else:
+        song_queue[guild_id] = []  # Ensure the queue is clear if empty
+        await interaction.followup.send("The queue is now empty.")
 
 bot.run(DISCORD_TOKEN)
