@@ -98,25 +98,43 @@ async def leave(interaction: Interaction):
     else:
         await interaction.response.send_message("The bot is not connected to a voice channel.")
 
-@bot.slash_command(name='play', description='To play song')
-async def play(interaction: Interaction, url: str):
-    if interaction.guild.voice_client is None:
-        if interaction.user.voice:
-            await interaction.user.voice.channel.connect()
+@bot.slash_command(name='play', description='To play a song')
+async def play(interaction: Interaction, search: str):
+    try:
+        # Immediately defer the interaction
+        await interaction.response.defer()
+
+        if interaction.guild.voice_client is None:
+            if interaction.user.voice:
+                await interaction.user.voice.channel.connect()
+            else:
+                await interaction.followup.send("You are not connected to a voice channel.", ephemeral=True)
+                return
+
+        guild_id = interaction.guild.id
+        if guild_id not in song_queue:
+            song_queue[guild_id] = []
+
+        if "http://" in search or "https://" in search:
+            url = search
         else:
-            await interaction.response.send_message("You are not connected to a voice channel.", ephemeral=True)
-            return
+            search_query = f"ytsearch:{search}"
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL({'format': 'bestaudio'}).extract_info(search_query, download=False))
+            video = info['entries'][0] if 'entries' in info and info['entries'] else None
+            url = video['webpage_url'] if video else None
+            if not url:
+                await interaction.followup.send("Could not find the song you requested.", ephemeral=True)
+                return
 
-    guild_id = interaction.guild.id
-    if guild_id not in song_queue:
-        song_queue[guild_id] = []
+        song_queue[guild_id].append(url)
+        position = len(song_queue[guild_id])
+        await interaction.followup.send(f'"{search}" is queued at position {position}.')
 
-    song_queue[guild_id].append(url)
-    position = len(song_queue[guild_id])
-    await interaction.response.send_message(f'"{url}" is queued at position {position}.')
-
-    if not interaction.guild.voice_client.is_playing():
-        await play_next_song(interaction)
+        if not interaction.guild.voice_client.is_playing():
+            await play_next_song(interaction)
+    except Exception as e:
+        await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
 
 @bot.slash_command(name='pause', description='This command pauses the song')
 async def pause(interaction: Interaction):
@@ -144,13 +162,19 @@ async def resume(interaction: Interaction):
     else:
         await interaction.response.send_message("There is nothing to resume.", ephemeral=True)
 
-@bot.slash_command(name='stop', description='Stops the song')
-async def stop(interaction:Interaction):
-    voice_client = interaction.message.guild.voice_client
-    if voice_client.is_playing():
-        await voice_client.stop()
+@bot.slash_command(name='remove', description='Stops the song')
+async def remove(interaction: Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used within a server.", ephemeral=True)
+        return
+
+    voice_client = interaction.guild.voice_client
+    if voice_client and voice_client.is_playing():
+        voice_client.stop()
+        await interaction.response.send_message("The playback has been stopped.")
     else:
-        await interaction.send("The bot is not playing anything at the moment.")
+        await interaction.response.send_message("The bot is not playing anything at the moment.", ephemeral=True)
+
 
 @bot.slash_command(name='skip', description='Skips the current song and plays the next one in the queue.')
 async def skip(interaction: Interaction):
