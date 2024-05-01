@@ -5,7 +5,6 @@ from nextcord.ext import commands
 from nextcord import Interaction
 from dotenv import load_dotenv
 import yt_dlp
-from yt_dlp import DownloadError
 
 
 load_dotenv()
